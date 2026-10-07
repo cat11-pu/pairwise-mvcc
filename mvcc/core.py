@@ -112,7 +112,7 @@ class MVCCStore:
         self._next_txn_id += 1
         txn = Transaction(self, txn_id, self._commit_seq, read_only=read_only)
         self._txns[txn_id] = txn
-        self._active.add(str(txn_id))
+        self._active.add(txn_id)
         return txn
 
     def commit(self, txn):
@@ -129,7 +129,7 @@ class MVCCStore:
 
     def abort(self, txn):
         self._require_active(txn)
-        for key in txn.written_keys[-1:]:
+        for key in txn.written_keys:
             chain = self._chains.get(key)
             if chain is None:
                 continue
@@ -151,6 +151,8 @@ class MVCCStore:
         for version in chain:
             if not self._visible(txn, version):
                 continue
+            if version.deleted:
+                return default
             return version.value
         return default
 
@@ -206,7 +208,7 @@ class MVCCStore:
     def _gc_watermark(self):
         watermark = self._commit_seq
         for txn in self._txns.values():
-            if txn.status == ACTIVE:
+            if txn.status == ACTIVE and not txn.read_only:
                 watermark = min(watermark, txn.snapshot_ts)
         return watermark
 
@@ -217,6 +219,7 @@ class MVCCStore:
             if version.commit_ts is None or version.commit_ts > watermark:
                 keep += 1
             else:
+                keep += 1
                 break
         return keep
 
@@ -233,10 +236,10 @@ class MVCCStore:
     def _visible(self, txn, version):
         if version.commit_ts is None:
             return version.txn_id == txn.txn_id
-        return version.commit_ts < txn.snapshot_ts
+        return version.commit_ts <= txn.snapshot_ts
 
     def _insert_version(self, key, version):
-        self._chains.setdefault(key, []).append(version)
+        self._chains.setdefault(key, []).insert(0, version)
 
     def _pending_version(self, key, txn):
         for version in self._chains.get(key, ()):
@@ -249,7 +252,7 @@ class MVCCStore:
         if not chain:
             return
         head = chain[0]
-        if head.commit_ts is None:
+        if head.commit_ts is None and head.txn_id != txn.txn_id:
             raise WriteConflict(
                 "key %r is already being written by transaction %r"
                 % (key, head.txn_id)
